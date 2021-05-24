@@ -93,9 +93,9 @@ def compute_bellman_backup(state_idx_i, state_idx_j, a):
     # these dropped off cars will be made available the day after.
     # this does not influence the day's reward but influences next state (cars at end of this next day)
     probs_dropped_off_at_store_0 = get_truncated_posson_probs(poisson_lambda_dropoffs_store_0,
-                                                              20 - len(probs_cars_left_at_store_0))
+                                                              20 - len(probs_cars_left_at_store_0)) # fixme
     probs_dropped_off_at_store_1 = get_truncated_posson_probs(poisson_lambda_dropoffs_store_1,
-                                                              20 - len(probs_cars_left_at_store_1))
+                                                              20 - len(probs_cars_left_at_store_1)) # fixme
 
     # for each possible count before cars are dropped off,
     # the number of cars dropped off at that location is independent
