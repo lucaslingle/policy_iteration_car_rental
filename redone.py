@@ -10,6 +10,7 @@ import numpy as np
 import math
 from collections import Counter
 import copy
+import matplotlib.pyplot as plt
 
 
 class JacksCarRental:
@@ -67,20 +68,6 @@ class JacksCarRental:
                 valid_actions.append(action)
         return valid_actions
 
-    def compute_store_revenue(self, store_state, store_action, store_observed_requests):
-        """
-        :param store_state: integer number of cars at store
-        :param store_action: integer net number of cars to move to the store.
-        :param store_observed_requests: number of requests at the store.
-        :return: revenue
-        """
-        assert self.is_valid_store_action(store_state, store_action)
-
-        num_cars_at_store = store_state + store_action
-        revenue = self.renting_reward_multiple * min(store_observed_requests, num_cars_at_store)
-
-        return revenue
-
     def compute_expected_store_revenue(self, store_state, store_action, probs_store_observed_requests):
         """
         :param store_state: tuple containing number of cars at store 0, store 1
@@ -94,7 +81,7 @@ class JacksCarRental:
         assert self.is_valid_store_action(store_state, store_action)
 
         num_cars_at_store = store_state + store_action
-        possible_cars_rented = np.maximum(
+        possible_cars_rented = np.minimum(
             num_cars_at_store * np.ones(self.max_cars_per_store+1),
             np.arange(0, self.max_cars_per_store+1) # [0,max_cars_per_store].
         ) # indexes over different hypothetical request amounts.
@@ -198,7 +185,7 @@ class JacksCarRental:
         The probability that more than max_cars_per_store are dropped off shall be added on to the
         probability that max_cars_per_store are dropped off. This works because the one use-case
         for this function is for computing the probability distribution over the next state:
-        extra requests have no effect on state transition dynamics, since extra cars beyond max_cars_per_store
+        extra dropoffs have no effect on state transition dynamics, since extra cars beyond max_cars_per_store
         shall be sent back to the nationwide company, and removed from the problem.
 
         :return: the probabilities as a numpy array
@@ -219,7 +206,7 @@ class JacksCarRental:
         The probability that more than max_cars_per_store are dropped off shall be added on to the
         probability that max_cars_per_store are dropped off. This works because the one use-case
         for this function is for computing the probability distribution over the next state:
-        extra requests have no effect on state transition dynamics, since extra cars beyond max_cars_per_store
+        extra dropoffs have no effect on state transition dynamics, since extra cars beyond max_cars_per_store
         shall be sent back to the nationwide company, and removed from the problem.
 
         :return: the probabilities as a numpy array
@@ -252,8 +239,8 @@ class JacksCarRental:
             cars_left_at_store0 = max(0, num_cars_at_store0 - num_requests)
             for dropoffs in range(0, self.max_cars_per_store):
                 prob_b = probs_store0_observed_dropoffs[dropoffs]
-                cars_for_next_day = min(20, cars_left_at_store0+dropoffs)
-                probabilities[cars_for_next_day] += prob_a * prob_b
+                cars_at_end_of_day_store0 = min(20, cars_left_at_store0+dropoffs)
+                probabilities[cars_at_end_of_day_store0] += prob_a * prob_b
 
         return probabilities
 
@@ -262,7 +249,7 @@ class JacksCarRental:
         Computes the probability distribution over next states for store 1.
         This can be done independently of the computation for store 0,
         since the state transition dynamics depend only on the store1_state, store1_action
-        and the two independent poisson processes for store 0 (requests and dropoffs).
+        and the two independent poisson processes for store 1 (requests and dropoffs).
 
         :param store1_state: integer number of cars at store 1
         :param store1_action: integer net number of cars of cars to move to store 0.
@@ -278,8 +265,8 @@ class JacksCarRental:
             cars_left_at_store1 = max(0, num_cars_at_store1 - num_requests)
             for dropoffs in range(0, self.max_cars_per_store):
                 prob_b = probs_store1_observed_dropoffs[dropoffs]
-                cars_for_next_day = min(20, cars_left_at_store1 + dropoffs)
-                probabilities[cars_for_next_day] += prob_a * prob_b
+                cars_at_end_of_day_store1 = min(20, cars_left_at_store1 + dropoffs)
+                probabilities[cars_at_end_of_day_store1] += prob_a * prob_b
 
         return probabilities
 
@@ -372,7 +359,7 @@ class Runner:
     def __init__(self):
         self.max_cars_per_store = 20
         self.gamma = 0.90
-        self.delta_thresh = 0.01
+        self.delta_thresh = 0.001
 
         self.env = JacksCarRental(self.max_cars_per_store)
         self.agent = Agent(self.max_cars_per_store, self.gamma)
@@ -446,8 +433,12 @@ class Runner:
 
 if __name__ == '__main__':
     runner = Runner()
-    for itr in range(10):
+    for itr in range(0, 4):
         print(itr)
         runner.iterate()
 
     print(runner.agent.value_estimates)
+    print(runner.agent.value_estimates[0, 0])
+    print(runner.agent.value_estimates[20,20])
+    plt.imshow(runner.agent.value_estimates)
+    plt.show()
