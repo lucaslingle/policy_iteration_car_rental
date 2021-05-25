@@ -372,10 +372,10 @@ class Runner:
 
             state_ids = np.random.permutation((self.max_cars_per_store+1) * (self.max_cars_per_store+1))
             delta = 0
-            for i in range(0, 21 * 21):
+            for i in range(0, (self.max_cars_per_store+1) * (self.max_cars_per_store+1)):
                 # end of the day
                 state_id = state_ids[i]
-                state_idx_i, state_idx_j = state_id // 21, state_id % 21
+                state_idx_i, state_idx_j = state_id // (self.max_cars_per_store+1), state_id % (self.max_cars_per_store+1)
 
                 # over night
                 action = self.agent.policy[state_idx_i, state_idx_j]
@@ -404,9 +404,9 @@ class Runner:
 
     def policy_improvement(self):
         print("policy_improvement time!")
-        for i in range(0, self.max_cars_per_store * self.max_cars_per_store):
+        for i in range(0, (self.max_cars_per_store+1) * (self.max_cars_per_store+1)):
             state_id = i
-            state_idx_i, state_idx_j = state_id // 21, state_id % 21
+            state_idx_i, state_idx_j = state_id // (self.max_cars_per_store+1), state_id % (self.max_cars_per_store+1)
             state = (state_idx_i, state_idx_j)
             #print(f"policy_improvement state {state}")
             argmax_a = None
@@ -439,6 +439,6 @@ if __name__ == '__main__':
 
     print(runner.agent.value_estimates)
     print(runner.agent.value_estimates[0, 0])
-    print(runner.agent.value_estimates[20,20])
+    print(runner.agent.value_estimates[runner.max_cars_per_store, runner.max_cars_per_store])
     plt.imshow(runner.agent.value_estimates)
     plt.show()
