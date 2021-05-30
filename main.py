@@ -9,196 +9,437 @@ http://www.incompleteideas.net/sutton/book/first/4/node4.html
 import numpy as np
 import math
 from collections import Counter
-
-# the value function. we use the coordinates of a 2D array to represent each state.
-values = np.zeros(dtype=np.float32, shape=(21,21))
-
-# the policy is deterministic, and we represent it via the net num cars to move from store0 to store1.
-# as with the value function, we use the coordinates of a 2D array to represent each state.
-policy = np.zeros(dtype=np.int32, shape=(21,21))
-
-# actions
-actions = np.linspace(start=-5, stop=5, num=11).astype(np.int32)
-
-# value function improvement must be less than this amount for all states in a sweep before we stop iterating.
-delta_thresh = 0.01
-
-# problem-specific quantities influencing the reward function in each state.
-poisson_lambda_request_store_0 = 3.0
-poisson_lambda_request_store_1 = 4.0
-
-poisson_lambda_dropoffs_store_0 = 3.0
-poisson_lambda_dropoffs_store_1 = 2.0
-
-mvmt_reward_multiple = -2.0
-renting_reward_multiple = 10.0
-
-gamma = 0.90
+import copy
+import matplotlib.pyplot as plt
 
 
-def get_truncated_posson_probs(lam, max_n):
-    numers = lam ** np.arange(0, max_n+1)
-    denoms = np.array(list(map(lambda i: math.factorial(i), np.arange(0, max_n+1))))
-    probs = np.exp(-lam) * numers / denoms
-    return probs
+class JacksCarRental:
+    def __init__(self, max_cars_per_store):
+        self._max_cars_per_store = max_cars_per_store
+        self._action_space = [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
+
+        self.lam_request_store_0 = 3.0
+        self.lam_request_store_1 = 4.0
+        self.lam_dropoff_store_0 = 3.0
+        self.lam_dropoff_store_1 = 2.0
+
+        self.mvmt_cost_multiple = 2.0
+        self.renting_reward_multiple = 10.0
+
+    @property
+    def max_cars_per_store(self):
+        return self._max_cars_per_store
+
+    @property
+    def action_space(self):
+        return self._action_space
+
+    def is_valid_store_action(self, store_state, store_action):
+        """
+        :param store_state: integer number of cars at store
+        :param store_action: integer net number of cars of cars to move to the store.
+        :return:
+        """
+        store_state_next = store_state + store_action
+        if 0 <= store_state_next <= self._max_cars_per_store:
+            return True
+        else:
+            return False
+
+    def is_valid_action(self, state, action):
+        """
+        :param state: tuple containing number of cars at store 0, store 1
+        :param action: integer net number of cars of cars to move from store 0 to store 1.
+        :return:
+        """
+        store0_action_valid = self.is_valid_store_action(store_state=state[0], store_action=-action)
+        store1_action_valid = self.is_valid_store_action(store_state=state[1], store_action=action)
+        return store0_action_valid and store1_action_valid
+
+    def get_valid_actions(self, state):
+        """
+        :param state: tuple containing number of cars at store 0, store 1
+        :param state: integer net number of cars of cars to move from store 0 to store 1.
+        :return:
+        """
+        valid_actions = []
+        for action in self.action_space:
+            if self.is_valid_action(state, action):
+                valid_actions.append(action)
+        return valid_actions
+
+    def compute_expected_store_revenue(self, store_state, store_action, probs_store_observed_requests):
+        """
+        :param store_state: tuple containing number of cars at store 0, store 1
+        :param store_action: integer net number of cars to move to the store.
+        :param probs_store_observed_requests: array of length max_cars_per_store+2, 
+            containing probabilities for [0, max_cars_per_store]. 
+            the probabilities for anything beyond the max number of *possible* cars should be added on to final prob
+            before passing to this function. 
+        :return: expected revenue from store
+        """
+        assert self.is_valid_store_action(store_state, store_action)
+
+        num_cars_at_store = store_state + store_action
+        possible_cars_rented = np.minimum(
+            num_cars_at_store * np.ones(self.max_cars_per_store+1),
+            np.arange(0, self.max_cars_per_store+1) # [0,max_cars_per_store].
+        ) # indexes over different hypothetical request amounts.
+
+        possible_revenues = self.renting_reward_multiple * possible_cars_rented
+        expected_revenue = np.sum(probs_store_observed_requests * possible_revenues)
+
+        return expected_revenue
+
+    def compute_probs_store0_observed_requests(self):
+        """
+        Computes the probability distribution over different number of cars being requested
+        from store 0. The distribution is represented using an array of length max_cars_per_store+1,
+        corresponding to the integers from 0 to max_cars_per_store.
+
+        The probability that more than max_cars_per_store are requested shall be added on to the
+        probability that max_cars_per_store are requested. This works because the two use-cases
+        for this function are for computing expected reward and computing probability distributions
+        over next states: the reward for extra requests beyond the maximum number of cars available is zero,
+        and extra requests have no effect on state transition dynamics.
+
+        :return: the probabilities as a numpy array.
+        """
+        ints = np.arange(0, self.max_cars_per_store+1)  # [0, max_cars_per_store].
+        numerators = np.exp(-self.lam_request_store_0) * (self.lam_request_store_0 ** ints)
+        denominators = np.array(list(map(lambda k: math.factorial(k), list(ints))))
+        probs = numerators / denominators
+        probs[-1] += (1.0 - np.sum(probs))
+        return probs
+
+    def compute_probs_store1_observed_requests(self):
+        """
+        Computes the probability distribution over different number of cars being requested
+        from store 1. The distribution is represented using an array of length max_cars_per_store+1,
+        corresponding to the integers from 0 to max_cars_per_store.
+
+        The probability that more than max_cars_per_store are requested shall be added on to the
+        probability that max_cars_per_store are requested. This works because the two use-cases
+        for this function are for computing expected reward and computing probability distributions
+        over next states: the reward for extra requests beyond the maximum number of cars available is zero,
+        and extra requests have no effect on state transition dynamics.
+
+        :return: the probabilities as a numpy array.
+        """
+        ints = np.arange(0, self.max_cars_per_store+1)  # [0, max_cars_per_store].
+        numerators = np.exp(-self.lam_request_store_1) * (self.lam_request_store_1 ** ints)
+        denominators = np.array(list(map(lambda k: math.factorial(k), list(ints))))
+        probs = numerators / denominators
+        probs[-1] += (1.0 - np.sum(probs))
+        return probs
+
+    def compute_expected_franchise_revenue(self, state, action):
+        """
+        Computes the expected revenue at the next timestep from car rentals at both stores 0 and 1.
+        The revenues from the locations are independent, given the action of moving cars overnight.
+        This is because the requests at each store follow independent poisson distributions.
+
+        :param state: tuple containing number of cars at store 0, store 1
+        :param action: integer net number of cars of cars to move from store 0 to store 1.
+        :return: expected franchise revenue for the next timestep,
+                 given the state and action at this timestep.
+        """
+        probs_store0_observed_requests = self.compute_probs_store0_observed_requests()
+        probs_store1_observed_requests = self.compute_probs_store1_observed_requests()
+
+        # the revenue streams are independent since cars arrive at both locations
+        # according to independent poisson distributions.
+        expected_store_0_revenue = self.compute_expected_store_revenue(
+            store_state=state[0], store_action=-action,
+            probs_store_observed_requests=probs_store0_observed_requests)
+
+        expected_store_1_revenue = self.compute_expected_store_revenue(
+            store_state=state[1], store_action=action,
+            probs_store_observed_requests=probs_store1_observed_requests)
+
+        expected_revenue = expected_store_0_revenue + expected_store_1_revenue
+        return expected_revenue
+
+    def compute_expected_franchise_profit(self, state, action):
+        """
+        Compute the expected profit at the next timestep, obtained from the expected franchise revenue,
+        minus the expected cost from taking the action of moving a certain number of cars
+        between stores overnight.
+
+        :param state: tuple containing number of cars at store 0, store 1
+        :param action: integer net number of cars of cars to move from store 0 to store 1.
+        :return: expected franchise profit for the next timestep,
+                 given the state and action at this timestep.
+        """
+        expected_revenue = self.compute_expected_franchise_revenue(state, action)
+        cost = self.mvmt_cost_multiple * math.fabs(action)
+        expected_profit = expected_revenue - cost
+        return expected_profit
+
+    def compute_probs_store0_observed_dropoffs(self):
+        """
+        Computes the probability distribution over different number of cars being requested
+        from store 0. The distribution is represented using an array of length max_cars_per_store+1,
+        corresponding to the integers from 0 to max_cars_per_store.
+
+        The probability that more than max_cars_per_store are dropped off shall be added on to the
+        probability that max_cars_per_store are dropped off. This works because the one use-case
+        for this function is for computing the probability distribution over the next state:
+        extra dropoffs have no effect on state transition dynamics, since extra cars beyond max_cars_per_store
+        shall be sent back to the nationwide company, and removed from the problem.
+
+        :return: the probabilities as a numpy array
+        """
+        ints = np.arange(0, self.max_cars_per_store + 1)  # [0, max_cars_per_store].
+        numerators = np.exp(-self.lam_dropoff_store_0) * (self.lam_dropoff_store_0 ** ints)
+        denominators = np.array(list(map(lambda k: math.factorial(k), list(ints))))
+        probs = numerators / denominators
+        probs[-1] += (1.0 - np.sum(probs))
+        return probs
+
+    def compute_probs_store1_observed_dropoffs(self):
+        """
+        Computes the probability distribution over different number of cars being requested
+        from store 1. The distribution is represented using an array of length max_cars_per_store+1,
+        corresponding to the integers from 0 to max_cars_per_store.
+
+        The probability that more than max_cars_per_store are dropped off shall be added on to the
+        probability that max_cars_per_store are dropped off. This works because the one use-case
+        for this function is for computing the probability distribution over the next state:
+        extra dropoffs have no effect on state transition dynamics, since extra cars beyond max_cars_per_store
+        shall be sent back to the nationwide company, and removed from the problem.
+
+        :return: the probabilities as a numpy array
+        """
+        ints = np.arange(0, self.max_cars_per_store + 1)  # [0, max_cars_per_store].
+        numerators = np.exp(-self.lam_dropoff_store_1) * (self.lam_dropoff_store_1 ** ints)
+        denominators = np.array(list(map(lambda k: math.factorial(k), list(ints))))
+        probs = numerators / denominators
+        probs[-1] += (1.0 - np.sum(probs))
+        return probs
+
+    def compute_probabilities_of_store0_states(self, store0_state, store0_action):
+        """
+        Computes the probability distribution over next states for store 0.
+        This can be done independently of the computation for store 1,
+        since the state transition dynamics depend only on the store0_state, store0_action
+        and the two independent poisson processes for store 0 (requests and dropoffs).
+
+        :param store0_state: integer number of cars at store 0.
+        :param store0_action: integer net number of cars of cars to move to store 0.
+        :return: the probabilities as a collections.Counter object.
+        """
+        probs_store0_observed_requests = self.compute_probs_store0_observed_requests()
+        probs_store0_observed_dropoffs = self.compute_probs_store0_observed_dropoffs()
+
+        num_cars_at_store0 = store0_state + store0_action  # includes cars moved overnight
+        probabilities = Counter()
+        for num_requests in range(0, self.max_cars_per_store):
+            prob_a = probs_store0_observed_requests[num_requests]
+            cars_left_at_store0 = max(0, num_cars_at_store0 - num_requests)
+            for dropoffs in range(0, self.max_cars_per_store):
+                prob_b = probs_store0_observed_dropoffs[dropoffs]
+                cars_at_end_of_day_store0 = min(20, cars_left_at_store0+dropoffs)
+                probabilities[cars_at_end_of_day_store0] += prob_a * prob_b
+
+        return probabilities
+
+    def compute_probabilities_of_store1_states(self, store1_state, store1_action):
+        """
+        Computes the probability distribution over next states for store 1.
+        This can be done independently of the computation for store 0,
+        since the state transition dynamics depend only on the store1_state, store1_action
+        and the two independent poisson processes for store 1 (requests and dropoffs).
+
+        :param store1_state: integer number of cars at store 1
+        :param store1_action: integer net number of cars of cars to move to store 0.
+        :return: the probabilities as a collections.Counter object.
+        """
+        probs_store1_observed_requests = self.compute_probs_store1_observed_requests()
+        probs_store1_observed_dropoffs = self.compute_probs_store1_observed_dropoffs()
+
+        num_cars_at_store1 = store1_state + store1_action  # includes cars moved overnight
+        probabilities = Counter()
+        for num_requests in range(0, self.max_cars_per_store):
+            prob_a = probs_store1_observed_requests[num_requests]
+            cars_left_at_store1 = max(0, num_cars_at_store1 - num_requests)
+            for dropoffs in range(0, self.max_cars_per_store):
+                prob_b = probs_store1_observed_dropoffs[dropoffs]
+                cars_at_end_of_day_store1 = min(20, cars_left_at_store1 + dropoffs)
+                probabilities[cars_at_end_of_day_store1] += prob_a * prob_b
+
+        return probabilities
+
+    def compute_expected_value_of_next_state(self, state, action, values):
+        """
+        Computes the expected value estimate of the next state, given the current state and action,
+        and an array of value estimates.
+
+        Our only use-case for this function is in the
+        Bellman expectation equation backup, and for that purpose it suffices to
+        compute the expectation over rewards and next values separately,
+        thanks to the linearity of expectations.
+
+        We further simplify the computation by computing the probabilities of state transitions
+        for each store separately, since the store state transitions are independent,
+        given their current states and our action.
+
+        :param state: tuple containing number of cars at store 0, store 1
+        :param action: integer net number of cars of cars to move from store 0 to store 1.
+        :param values: 2D numpy array containing the value estimates for each state.
+        :return: float expected value estimate.
+        """
+        store0_state = state[0]
+        store0_action = -action
+        store0_state_probs = self.compute_probabilities_of_store0_states(store0_state, store0_action)
+
+        store1_state = state[1]
+        store1_action = action
+        store1_state_probs = self.compute_probabilities_of_store1_states(store1_state, store1_action)
+
+        expected_value = 0.0
+        for next_store0_state in store0_state_probs:
+            prob_a = store0_state_probs[next_store0_state]
+            for next_store1_state in store1_state_probs:
+                prob_b = store1_state_probs[next_store1_state]
+                expected_value += prob_a * prob_b * values[next_store0_state, next_store1_state]
+
+        return expected_value
+
+    def compute_bellman_backup(self, state, action, values, gamma):
+        """
+        Compute the value targets for the Bellman expectation equation.
+
+        :param state: tuple containing number of cars at store 0, store 1
+        :param action: integer net number of cars of cars to move from store 0 to store 1.
+        :param values: 2D numpy array containing the value estimates for each state.
+        :param gamma: discount factor.
+        :return:
+        """
+        E_r_t = self.compute_expected_franchise_profit(state, action)
+        E_V_tp1 = self.compute_expected_value_of_next_state(state, action, values)
+        return E_r_t + gamma * E_V_tp1
 
 
-def compute_bellman_backup(state_idx_i, state_idx_j, a):
-    cars_at_store_0 = state_idx_i
-    cars_at_store_1 = state_idx_j
-    cars_at_store_0 -= a
-    cars_at_store_1 += a
+class Agent:
+    def __init__(self, max_cars_per_store, gamma):
+        self._gamma = gamma
+        self._max_cars_per_store = max_cars_per_store
+        self._value_estimates = np.zeros(
+            dtype=np.float32, shape=(max_cars_per_store+1, max_cars_per_store+1)
+        )  # [0,max_cars_per_store]^2.
+        self._policy = np.zeros(
+            dtype=np.int32, shape=(max_cars_per_store+1, max_cars_per_store+1)
+        )  # [0,max_cars_per_store]^2.
 
-    assert cars_at_store_0 >= 0 and cars_at_store_0 <= 20
-    assert cars_at_store_1 >= 0 and cars_at_store_1 <= 20
+    @property
+    def gamma(self):
+        return self._gamma
 
-    # transition to next day.
-    # requests during the day - influences reward at current timestep
-    probs_cars_requested_from_store_0 = get_truncated_posson_probs(poisson_lambda_request_store_0,
-                                                                   cars_at_store_0)
-    probs_cars_requested_from_store_1 = get_truncated_posson_probs(poisson_lambda_request_store_1,
-                                                                   cars_at_store_1)
+    @property
+    def max_cars_per_store(self):
+        return self._max_cars_per_store
 
-    expected_reward_for_store_0_given_state_and_policy = 0.0
-    if len(probs_cars_requested_from_store_0) > 0:
-        expected_reward_for_store_0_given_state_and_policy = renting_reward_multiple * np.sum(probs_cars_requested_from_store_0 * np.arange(0, cars_at_store_0 + 1))
+    @property
+    def policy(self):
+        return copy.deepcopy(self._policy)
 
-    expected_reward_for_store_1_given_state_and_policy = 0.0
-    if len(probs_cars_requested_from_store_1) > 0:
-        expected_reward_for_store_1_given_state_and_policy = renting_reward_multiple * np.sum(probs_cars_requested_from_store_1 * np.arange(0, cars_at_store_1 + 1))
+    @property
+    def value_estimates(self):
+        return copy.deepcopy(self._value_estimates)
 
-    expected_reward_given_state_and_policy = expected_reward_for_store_0_given_state_and_policy + \
-                                             expected_reward_for_store_1_given_state_and_policy + \
-                                             mvmt_reward_multiple * math.fabs(a)
+    def assign_new_values(self, new_value_estimates):
+        self._value_estimates = new_value_estimates
 
-    # the bellmann backup is an expectation,
-    # and so we can apply linearity of expectations to compute the expected reward separately
-
-    # now for the next state's value.
-    probs_cars_left_at_store_0 = np.zeros(21, dtype=np.float32) # 0 thru 20.
-    if len(probs_cars_requested_from_store_0) == 0:
-        probs_cars_left_at_store_0[0] = 1.0
-    else:
-        probs_cars_left_at_store_0[-len(probs_cars_requested_from_store_0):] = probs_cars_requested_from_store_0[::-1]
-        probs_cars_left_at_store_0[0] += 1.0 - np.sum(probs_cars_requested_from_store_0)
-
-    probs_cars_left_at_store_1 = np.zeros(21, dtype=np.float32) # 0 thru 20.
-    if len(probs_cars_requested_from_store_1) == 0:
-        probs_cars_left_at_store_1[0] = 1.0
-    else:
-        probs_cars_left_at_store_1[-len(probs_cars_requested_from_store_1):] = probs_cars_requested_from_store_1[::-1]
-        probs_cars_left_at_store_1[0] += 1.0 - np.sum(probs_cars_requested_from_store_1)
-
-    # now the dropoffs during the day.
-    # these dropped off cars will be made available the day after.
-    # this does not influence the day's reward but influences next state (cars at end of this next day)
-    probs_dropped_off_at_store_0 = get_truncated_posson_probs(poisson_lambda_dropoffs_store_0,
-                                                              20 - len(probs_cars_left_at_store_0)) # fixme
-    probs_dropped_off_at_store_1 = get_truncated_posson_probs(poisson_lambda_dropoffs_store_1,
-                                                              20 - len(probs_cars_left_at_store_1)) # fixme
-
-    # for each possible count before cars are dropped off,
-    # the number of cars dropped off at that location is independent
-    # so the total number of cars left at the end of the day depends on the sum of these two quantities
-    # each possible event leading to the same number of cars left at the end of the day is an event that is mutually exclusive
-    # with other events for the given store, so we can just sum the individual probabilities to obtain the overall probability.
-    #
-    store_0_outcomes = Counter()  # dictionary with implicitly zero-initted keys.
-    for dropped_off in np.arange(0, len(probs_dropped_off_at_store_0)):
-        for existing in np.arange(0, len(probs_cars_left_at_store_0)):
-            summ = dropped_off + existing
-            prob = probs_dropped_off_at_store_0[dropped_off] * probs_cars_left_at_store_0[existing]
-            store_0_outcomes[summ] += prob
-
-    store_1_outcomes = Counter()  # dictionary with implicitly zero-initted keys.
-    for dropped_off in np.arange(0, len(probs_dropped_off_at_store_1)):
-        for existing in np.arange(0, len(probs_cars_left_at_store_1)):
-            summ = dropped_off + existing
-            prob = probs_dropped_off_at_store_1[dropped_off] * probs_cars_left_at_store_1[existing]
-            store_1_outcomes[summ] += prob
-
-    expected_value_next_state = 0.0
-    for hypothetical_store_0_nextstate in store_0_outcomes:
-        for hypothetical_store_1_nextstate in store_1_outcomes:
-            value_nextstate = values[hypothetical_store_0_nextstate, hypothetical_store_1_nextstate]
-            prob = store_0_outcomes[hypothetical_store_0_nextstate] * store_1_outcomes[
-                hypothetical_store_1_nextstate]
-            expected_value_next_state += prob * value_nextstate
-
-    vtarg = expected_reward_given_state_and_policy + gamma * expected_value_next_state
-    return vtarg
+    def assign_new_policy(self, new_policy):
+        self._policy = new_policy
 
 
-def evaluate_policy():
-    while True:
-        policy_evaluations_so_far = 0
-        print(f"policy_evaluations_so_far: {policy_evaluations_so_far}")
+class Runner:
+    def __init__(self):
+        self.max_cars_per_store = 20
+        self.gamma = 0.90
+        self.delta_thresh = 0.01
+
+        self.env = JacksCarRental(self.max_cars_per_store)
+        self.agent = Agent(self.max_cars_per_store, self.gamma)
+
+    def policy_evaluation(self):
         stop_request = False
+        policy_evaluations_so_far = 0
+        value_estimates = np.zeros(shape=((self.max_cars_per_store+1), (self.max_cars_per_store+1)), dtype=np.float32)
+        while True:
+            print(f"policy_evaluations_so_far: {policy_evaluations_so_far}\n\n")
 
-        state_ids = np.random.permutation(21*21)
-        delta = 0
-        for i in range(0, 21*21):
-            # end of the day
-            state_id = state_ids[i]
-            state_idx_i, state_idx_j = state_id // 21, state_id % 21
+            state_ids = np.random.permutation((self.max_cars_per_store+1) * (self.max_cars_per_store+1))
+            delta = 0
+            for i in range(0, (self.max_cars_per_store+1) * (self.max_cars_per_store+1)):
+                # end of the day
+                state_id = state_ids[i]
+                state_idx_i, state_idx_j = state_id // (self.max_cars_per_store+1), state_id % (self.max_cars_per_store+1)
 
-            # over night
-            a = policy[state_idx_i, state_idx_j]
+                # over night
+                action = self.agent.policy[state_idx_i, state_idx_j]
 
-            # compute expectation of what happens during the next day:
-            # expected return based on one-step bellman backup.
-            vtarg = compute_bellman_backup(state_idx_i, state_idx_j, a)
-            vprev = values[state_idx_i, state_idx_j]
-            values[state_idx_i, state_idx_j] = vtarg
+                # compute expectation of what happens during the next day:
+                # expected return based on one-step bellman backup.
+                state = (state_idx_i, state_idx_j)
+                vtarg = self.env.compute_bellman_backup(state, action, value_estimates, self.gamma)
 
-            # delta_thresh
-            delta = max(delta, math.fabs(vtarg - vprev))
+                vprev = value_estimates[state_idx_i, state_idx_j]  # save this for stopping criterion
+                value_estimates[state_idx_i, state_idx_j] = vtarg   # overwrite new estimate
 
-            if delta < delta_thresh:
-                stop_request = True
+                delta = max(delta, math.fabs(vtarg - vprev))
+                if delta < self.delta_thresh:
+                    stop_request = True
+                    print("stop requested")
+                    break
+
+            policy_evaluations_so_far += 1
+            if stop_request:
                 break
 
-        if stop_request:
-            break
+        self.agent.assign_new_values(value_estimates)
 
-        policy_evaluations_so_far += 1
-        #print(f"new_values: {policy}")
+    def policy_improvement(self):
+        print("policy_improvement time!")
+        for i in range(0, (self.max_cars_per_store+1) * (self.max_cars_per_store+1)):
+            state_id = i
+            state_idx_i, state_idx_j = state_id // (self.max_cars_per_store+1), state_id % (self.max_cars_per_store+1)
+            state = (state_idx_i, state_idx_j)
+            argmax_a = None
+            max_qpi_sa = None
 
-
-def improve_policy():
-    for i in range(0, 21*21):
-        state_id = i
-        state_idx_i, state_idx_j = state_id // 21, state_id % 21
-        argmax_a = None
-        max_qpi_sa = None
-        for a_idx in range(len(actions)):
-            a = actions[a_idx]
-            hypothetical_cars_at_store_0 = state_idx_i-a
-            hypothetical_cars_at_store_1 = state_idx_j+a
-
-            if hypothetical_cars_at_store_0 < 0 or hypothetical_cars_at_store_0 > 20:
-                continue
-
-            if hypothetical_cars_at_store_1 < 0 or hypothetical_cars_at_store_1 > 20:
-                continue
-
-            qpi_sa = compute_bellman_backup(state_idx_i, state_idx_j, a)
-
-            if argmax_a is None:
-                argmax_a = a
-                max_qpi_sa = qpi_sa
-            else:
-                if qpi_sa >= max_qpi_sa:
-                    argmax_a = a
+            for action in self.env.get_valid_actions(state):
+                qpi_sa = self.env.compute_bellman_backup(state, action, self.agent.value_estimates, self.gamma)
+                if argmax_a is None:
+                    argmax_a = action
                     max_qpi_sa = qpi_sa
+                else:
+                    if qpi_sa >= max_qpi_sa:
+                        argmax_a = action
+                        max_qpi_sa = qpi_sa
 
-        policy[state_idx_i, state_idx_j] = argmax_a
+            policy = self.agent.policy
+            policy[state_idx_i, state_idx_j] = argmax_a
+            self.agent.assign_new_policy(policy)
 
+    def iterate(self):
+        self.policy_evaluation()
+        self.policy_improvement()
 
 
 if __name__ == '__main__':
-    for _ in range(10):
-        evaluate_policy() # it works !!!
-        improve_policy() # does this???
+    runner = Runner()
+    for itr in range(0, 4):
+        print(itr)
+        runner.iterate()
 
-    print(values)
+    print(runner.agent.value_estimates)
+    print(runner.agent.value_estimates[0, 0])
+    print(runner.agent.value_estimates[runner.max_cars_per_store, runner.max_cars_per_store])
+    plt.imshow(runner.agent.value_estimates)
+    plt.show()
+
+    plt.imshow(runner.agent.policy)
+    plt.show()
